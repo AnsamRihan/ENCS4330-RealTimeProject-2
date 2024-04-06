@@ -1,431 +1,8 @@
-#include "gui.h"
-#include "local.h"
-#include "ipcs.h"
-
-
-Customer customers[MAX_CUSTOMERS];
-ProductObject product[MAX_PRODUCTS];
-TeamObject teams[MAX_TEAMS];
-
-
-int msgqid_gui; // Message queue ID
-PositionUpdateMessage *msg;
-char *shmptr_product;
-struct AllProducts *ptrAllProducts;
-int productAmountThresh;
-char endText[255];
-
-int employeeIndex = 1;
-int turn = 1;
-int temp1 = 0;
-int temp2 = 0; 
-
-// Main function
-int main(int argc, char *argv[]) {
-    productAmountThresh = atoi(argv[1]);
-    glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
-    glutInitWindowSize(1150, 650);
-    glutCreateWindow("Supermarket Simulation");
-
-    // Initialize positions
-    initPositions();
-
-    // OpenGL initialization
-    glClearColor(0.0, 0.0, 0.0, 1.0);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluOrtho2D(0.0, 1150.0, 0.0, 650.0); // Updated to match the new window size
-
-
-    glutDisplayFunc(display);
-
-    glutIdleFunc(display);
-
-    glutMainLoop();
-
-    return 0;
-}
-
-// Function to initialize positions for customers and employees
-void initPositions() {
-
-    // singal hander for SIGUSR1
-    if (signal(SIGUSR1, catchSIGUSR1) == SIG_ERR) {
-        perror("signal -- gui.c");
-        exit(1);
-    }
-
-    // singal hander for SIGUSR2
-    if (signal(SIGUSR2, catchSIGUSR2) == SIG_ERR) {
-        perror("signal -- gui.c");
-        exit(1);
-    }
-
-    // access the msg queue for the gui
-    msgqid_gui = createMessageQueue(MSGQKEY_GUI, "gui.c");
-
-    // access the shared memory segment for the all products struct
-    shmptr_product = (char *) malloc(sizeof(struct AllProducts));
-    shmptr_product = createSharedMemory(SHKEY_PRODUCT, sizeof(struct AllProducts), "gui.c");
-    ptrAllProducts = (struct AllProducts *) shmptr_product;
-
-    msg = (PositionUpdateMessage *) malloc(sizeof(PositionUpdateMessage));
-
-    // Initialize customer positions
-    for (int i = 0; i < MAX_CUSTOMERS; i++) {
-        customers[i].x = -10.0f;
-        customers[i].y = -10.0f;
-    }
-
-    // Initialize employee positions
-    float startX = -10.0f; // Starting X position for the first team member
-    float startY = -10.0f; // Starting Y position for the first team
-    float gapX = 0.0f;    // Horizontal gap between team members
-    float gapY = 0.0f;   // Vertical gap between teams
-
-    for (int i = 0; i < MAX_TEAMS; i++) {
-        for (int member = 0; member < MAX_EMPLOYEES; member++) {
-            //int index = i * MAX_EMPLOYEES + member;
-            teams[i].employees[member].x = startX + member * gapX;
-            teams[i].employees[member].y = startY + i * gapY;
-           
-            if (member == MAX_EMPLOYEES - 1) {
-                teams[i].employees[member].r = 0.9f;
-                teams[i].employees[member].g = 0.8f;
-                teams[i].employees[member].b = 0.1f;
-                
-            } else {
-                teams[i].employees[member].r = 0.15f;
-                teams[i].employees[member].g = 0.15f;
-                teams[i].employees[member].b = 1.0f;            
-            }
-      
-        }
-        teams[i].rollingCartAmount = 0;
-        // draw text with the rolling cart amount
-        char amount[255];
-        sprintf(amount, "%d", teams[i].rollingCartAmount);
-        drawText(amount, teams[i].employees[MAX_EMPLOYEES - 1].x - 10.0f, teams[i].employees[MAX_EMPLOYEES - 1].y - 5.0f, GLUT_BITMAP_HELVETICA_18, 1.0f, 1.0f, 1.0f);
-    }
-    for (int i = 0; i < MAX_PRODUCTS; i++) {
-        product[i].x = -10.0f;
-        product[i].y = -10.0f;
-    }
-}
-void drawArrowWithText() {
-    // Draw the arrow body
-    glColor3f(0.0f, 0.9f, 0.0f); // Green color
-    glBegin(GL_POLYGON);
-    glVertex2f(20.0f, 30.0f);
-    glVertex2f(200.0f, 30.0f); // Extended length to fit the text
-    glVertex2f(200.0f, 70.0f);
-    glVertex2f(20.0f, 70.0f);
-    glEnd();
-    
-    // Draw the arrowhead
-    glColor3f(0.0f, 0.9f, 0.0f); // Green color
-    glBegin(GL_TRIANGLES);
-    glVertex2f(200.0f, 20.0f);
-    glVertex2f(200.0f, 80.0f);
-    glVertex2f(270.0f, 50.0f); // Position adjusted for the extended arrow body
-    glEnd();
-
-    // Draw the text "Customers Go to Buy"
-    drawText("Customers Go to Buy", 20.0f, 45.0f, GLUT_BITMAP_HELVETICA_12, 1.0f, 1.0f, 1.0f);
-}
-
-void drawStorageBlock() {
-    drawRectangle(920.0f, 80.0f, 150.0f, 540.0f, 0.2f, 0.2f, 0.3f); 
-
-    drawText("Storage", 960.0f, 535.0f, GLUT_BITMAP_TIMES_ROMAN_24, 1.0f, 1.0f, 1.0f);
-
-    // Draw shelves as  squares at the sides of the Products block
-    for (int i = 1; i <= MAX_PRODUCTS/2; i++) {
-        drawRectangle(900.0f, 36.0f + i * 44.0f, 20.0f, 40.0f, 0.8f, 0.57f, 0.20f); //  shelves
-        // find product id
-        int productIndex = findProductIndex(i);
-        if (productIndex == -1) {
-            continue;
-        }
-        char name[255];
-        sprintf(name, "%s", ptrAllProducts->products[productIndex].Name.str);   
-        // draw product name in bold
-        drawText(name, 930.0f, 50.0f + i * 44.0f, GLUT_BITMAP_HELVETICA_12, 1.0f, 1.0f, 1.0f);
-        // draw product amount
-        char amount[255];
-        sprintf(amount, "%d", ptrAllProducts->products[productIndex].storageAmount);
-        // draw product amount in black
-        drawText(amount, 900.0f, 45.0f + i * 44.0f, GLUT_BITMAP_HELVETICA_12, 0.0f, 0.0f, 0.0f);
-    }
-
-    for (int i = MAX_PRODUCTS/2 +1 ; i <= MAX_PRODUCTS; i++) {
-        drawRectangle(1070.0f, 36.0f + (i - MAX_PRODUCTS/2) * 44.0f, 20.0f, 40.0f, 0.8f, 0.57f, 0.20f); //  shelves
-        // find product id
-        int productIndex = findProductIndex(i);
-        if (productIndex == -1) {
-            continue;
-        }
-        char name[255];
-        sprintf(name, "%s", ptrAllProducts->products[productIndex].Name.str);
-        // draw product name in bold
-        drawText(name, 990.0f, 50.0f + (i - MAX_PRODUCTS/2) * 44.0f, GLUT_BITMAP_HELVETICA_12, 1.0f, 1.0f, 1.0f);
-        // draw product amount
-        char amount[255];
-        sprintf(amount, "%d", ptrAllProducts->products[productIndex].storageAmount);
-        drawText(amount, 1070.0f, 45.0f + (i - MAX_PRODUCTS/2) * 44.0f, GLUT_BITMAP_HELVETICA_12, 0.0f, 0.0f, 0.0f);
-        
-    }
-
-    
-}
-
-void drawSupermarketLayout(){
-    drawCheckeredFloor(); // Draw the checkered floor first
-
-    // Draw item block in the middle  brown color
-    drawRectangle(300.0f, 80.0f, 200.0f, 540.0f, 0.2f, 0.2f, 0.3f); 
-
-    // Draw storage block on the right
-    drawStorageBlock();
-
-    // Draw Palestinian flag above the Products block with the same width as the item block
-    drawPalestinianFlag(300.0f, 570.0f, 200.0f, 70.0f); // Flag width same as Products block
-    //drawPalestinianFlag(900.0f, 570.0f, 150.0f, 60.0f); // Flag width same as Products block
-    drawSouthAfricanFlag(920.0f, 570.0f, 150.0f, 60.0f);
-
-    // Draw text on the Product block
-    drawText("Products", 355.0f, 535.0f, GLUT_BITMAP_TIMES_ROMAN_24, 1.0f, 1.0f, 1.0f);
-
-    // Draw customers as red dots on the left
-    for (int i = 0; i < MAX_CUSTOMERS; i++) {
-        drawCircle(customers[i].x, customers[i].y, 15.0f, 16, 0.9f, 0.1f, 0.1f);
-        // Number the customers
-        char numberBuffer[4];
-        sprintf(numberBuffer, "%d", i + 1);
-        drawText(numberBuffer, customers[i].x - 10.0f, customers[i].y - 5.0f, GLUT_BITMAP_HELVETICA_18, 1.0f, 1.0f, 1.0f);
-    }
-
-    // Draw shelves as  squares at the sides of the Products block
-    for (int i = 1; i <= MAX_PRODUCTS/2; i++) {
-        drawRectangle(280.0f, 36.0f + i * 44.0f, 20.0f, 40.0f, 0.8f, 0.57f, 0.20f); //  shelves
-
-        // find product id
-        int productIndex = findProductIndex(i);
-        if (productIndex == -1) {
-            continue;
-        }
-
-        // if the product below the threshold, make the shelf red
-        if (ptrAllProducts->products[productIndex].onShelvesAmount < productAmountThresh) {
-            drawRectangle(280.0f, 36.0f + i * 44.0f, 20.0f, 40.0f, 1.0f, 0.0f, 0.0f); //  shelves
-        } 
-
-        char name[255];
-        sprintf(name, "%s", ptrAllProducts->products[productIndex].Name.str);   
-        // draw product name in bold
-        drawText(name, 310.0f, 50.0f + i * 44.0f, GLUT_BITMAP_HELVETICA_12, 1.0f, 1.0f, 1.0f);
-        // draw product amount
-        char amount[255];
-        sprintf(amount, "%d", ptrAllProducts->products[productIndex].onShelvesAmount);
-        // draw product amount in black
-        drawText(amount, 280.0f, 45.0f + i * 44.0f, GLUT_BITMAP_HELVETICA_12, 0.0f, 0.0f, 0.0f);    
-
-    }
-    for (int i = MAX_PRODUCTS/2 +1 ; i <= MAX_PRODUCTS; i++) {
-        drawRectangle(500.0f, 36.0f + (i - MAX_PRODUCTS/2) * 44.0f, 20.0f, 40.0f, 0.8f, 0.57f, 0.20f); //  shelves
-
-        // find product id
-        int productIndex = findProductIndex(i);
-        if (productIndex == -1) {
-            continue;
-        }
-        if (ptrAllProducts->products[productIndex].onShelvesAmount < productAmountThresh) {
-            drawRectangle(500.0f, 36.0f + (i - MAX_PRODUCTS/2) * 44.0f, 20.0f, 40.0f, 1.0f, 0.0f, 0.0f); //  shelves
-        } 
-
-        char name[255];
-        sprintf(name, "%s", ptrAllProducts->products[productIndex].Name.str);
-        // draw product name in bold
-        drawText(name, 420.0f, 50.0f + (i - MAX_PRODUCTS/2) * 44.0f, GLUT_BITMAP_HELVETICA_12, 1.0f, 1.0f, 1.0f);
-        // draw product amount
-        char amount[255];
-        sprintf(amount, "%d", ptrAllProducts->products[productIndex].onShelvesAmount);
-        drawText(amount, 500.0f, 45.0f + (i - MAX_PRODUCTS/2) * 44.0f, GLUT_BITMAP_HELVETICA_12, 0.0f, 0.0f, 0.0f);
-        
-   
-    }
-    /*
-        Draw employees in horizontal lines for each team, with the teams vertically stacked
-    */
-    for (int i = 0; i < MAX_TEAMS; i++) {
-        for (int member = 0; member < MAX_EMPLOYEES; member++) {
-
-            drawCircle(teams[i].employees[member].x, teams[i].employees[member].y, 15.0f, 16, teams[i].employees[member].r, teams[i].employees[member].g, teams[i].employees[member].b);
-            // Number the employees
-            char numberBuffer[4];
-            sprintf(numberBuffer, "%d", member + 1);
-            drawText(numberBuffer, teams[i].employees[member].x - 10.0f, teams[i].employees[member].y - 5.0f, GLUT_BITMAP_HELVETICA_18, 1.0f, 1.0f, 1.0f);
-        }
-        // draw text with the rolling cart amount
-        char amount[255];
-        sprintf(amount, "%d", teams[i].rollingCartAmount);
-        drawText(amount, teams[i].employees[0].x + 20.0f, teams[i].employees[0].y, GLUT_BITMAP_HELVETICA_12, 1.0f, 1.0f, 1.0f);
-    }
-    
-    // draw the end text
-    drawText(endText, 600.0f, 550.0f, GLUT_BITMAP_TIMES_ROMAN_24, 1.0f, 1.0f, 1.0f);
-
-    //drawArrowWithText();
-}
-
-// function to find product id and return its index
-int findProductIndex(int productID) {
-    for (int i = 0; i < ptrAllProducts->numProducts; i++) {
-        if (ptrAllProducts->products[i].ID == productID) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-// Display callback
-void display() {
-    
-    glClear(GL_COLOR_BUFFER_BIT);
-   
-    while (msgrcv(msgqid_gui, msg, sizeof(PositionUpdateMessage), MSG_POS_UPDATE, IPC_NOWAIT) != -1) {
-        
-    
-        if (msg->personType == 1) { // Check if the message is for a customer
-            // move the customer
-            moveCustomer(msg->id, msg->x, msg->y);
-            
-        } else if (msg->personType == 2) { // Check if the message is for a team
-            moveTeam(msg->id, msg->x, msg->y, msg->state);
-        }
-    }
-
-
-    // Draw the supermarket layout
-    drawSupermarketLayout();
-
-    glutSwapBuffers();
-}
-
-
-// move the customer
-void moveCustomer(int id, int x, int y) {
-    if (x<0 && y<0) {
-
-        if (temp1%15 == 0){
-            temp2++;
-            temp1 = 0;
-        }
-
-        // move the customer to the market
-        customers[id].x = temp2 * 35.0f;
-        customers[id].y = 70.0f + temp1 * 35.0f;
-
-        temp1++;
-
-    } 
-    else if (x<0 && y>=0) {
-        // move the customer to product shelf
-        if(y <= 10){
-            customers[id].x = 260.0f;
-            customers[id].y = 51.0f + y * 44.0f;
-        }
-        else{
-            customers[id].x = 540.0f;
-            customers[id].y = 51.0f + (y-10) * 44.0f;
-        }
-        
-    }
-    else {
-        // exit the market
-        customers[id].x = -10.0f;
-        customers[id].y = -10.0f;
-        
-        
-    }
-}
-
-
-
-void moveTeam(int id, int x, int y, int state) {
-    // if the team is created
-    if (state == 0){
-        x++;
-        int gapX = 35.0f;
-        int gapY = 50.0f;
-        teams[id].employees[0].r = 0.9f;
-        teams[id].employees[0].g = 0.8f;
-        teams[id].employees[0].b = 0.1f;
-        for (int member = 0; member < x; member++) {
-            teams[id].employees[member].x = 810.0f - member * gapX;
-            teams[id].employees[member].y = 200.0f + id * gapY;
-        }
-    } 
-    // if the team manager is moving to the product in the storage
-    else if(state == 1){
-        int productID = ptrAllProducts->products[x].ID;
-        
-        // move the team manager to the storage to product y
-        if (productID <= 10){
-            teams[id].employees[0].x = 930.0f;
-            teams[id].employees[0].y = 51.0f + productID * 44.0f;
-        }
-        else{
-            teams[id].employees[0].x = 1110.0f;
-            teams[id].employees[0].y = 51.0f + (productID-10) * 44.0f;
-        } 
-
-    }
-    // if the team manager is moving back from the storage
-    else if (state == 2){
-        //int productID = ptrAllProducts->products[x].ID;
-        
-        // move the team manager back from the storage
-        teams[id].employees[0].x = 810.0f;
-        teams[id].employees[0].y = 200.0f + id * 50.0f;
-
-        // change the rolling cart amount
-        teams[id].rollingCartAmount = y;
-    }
-    // if the employee start working 
-    else if(state == 3 || state == 4){
-        if (turn ==1){ 
-            int productID = ptrAllProducts->products[y].ID;
-            // move the employee to the product shelf
-            if(y <= 10){
-                teams[id].employees[employeeIndex].x = 230.0f;
-                teams[id].employees[employeeIndex].y = 51.0f + productID * 44.0f;
-            }
-            else{
-                teams[id].employees[employeeIndex].x = 570.0f;
-                teams[id].employees[employeeIndex].y = 51.0f + (productID-10) * 44.0f;
-            }
-            // decrease the amount of the rolling cart
-            teams[id].rollingCartAmount--;
-        }
-        else{
-            // move the employee back to the team manager
-            teams[id].employees[employeeIndex].x = 810.0f - employeeIndex * 35.0f;
-            teams[id].employees[employeeIndex].y = 200.0f + id * 50.0f;
-
-            employeeIndex++;
-               
-        }
-
-        if (employeeIndex >= x+1){
-                employeeIndex = 1;
-            }
-        turn *= -1;
-    }
-    
-    
-}
+#include <GL/glut.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdlib.h> // For rand() and srand()
+#include <time.h>   // For time(), to seed the random number generator
 
 // Function to draw a rectangle
 void drawRectangle(float x, float y, float width, float height, float r, float g, float b) {
@@ -436,28 +13,6 @@ void drawRectangle(float x, float y, float width, float height, float r, float g
     glVertex2f(x + width, y + height);
     glVertex2f(x, y + height);
     glEnd();
-}
-
-// Function to draw a circle
-void drawCircle(float cx, float cy, float radius, int num_segments, float r, float g, float b) {
-    glColor3f(r, g, b);
-    glBegin(GL_TRIANGLE_FAN);
-    for (int i = 0; i < num_segments; i++) {
-        float theta = 2.0f * M_PI * (float)i / (float)num_segments;
-        float x = radius * cos(theta);
-        float y = radius * sin(theta);
-        glVertex2f(x + cx, y + cy);
-    }
-    glEnd();
-}
-
-// Function to draw text
-void drawText(const char *text, float x, float y, void *font, float r, float g, float b) {
-    glColor3f(r, g, b);
-    glRasterPos2f(x, y);
-    for (const char *c = text; *c != '\0'; c++) {
-        glutBitmapCharacter(font, *c);
-    }
 }
 
 // Function to draw the Palestinian flag
@@ -476,18 +31,6 @@ void drawPalestinianFlag(float x, float y, float width, float height) {
     glVertex2f(x + width / 2, y + height / 2);
     glEnd();
 }
-
-// Function to draw checkered floor
-void drawCheckeredFloor() {
-    int tileSize = 50;
-    for (int x = 0; x < 1150; x += tileSize) {
-        for (int y = 0; y < 650; y += tileSize) {
-            float color = (x / tileSize + y / tileSize) % 2 * 0.5f; // Checkerboard pattern
-            drawRectangle(x, y, tileSize, tileSize, color, color, color);
-        }
-    }
-}
-
 
 void drawSouthAfricanFlag(float x, float y, float width, float height) {
     // Draw three horizontal rectangles (blue, white, red)
@@ -529,14 +72,228 @@ void drawSouthAfricanFlag(float x, float y, float width, float height) {
 }
 
 
-void catchSIGUSR1(int sigNum) {
-    // change the end text
-    sprintf(endText, "Storage is out of stock");
+// Player positions for red and blue teams
+float playerPositions[2][6][2] = {
+    {{0.3, 0.0}, {0.45, -0.35}, {0.6, -0.5}, {0.75, 0.0}, {0.6, 0.5}, {0.45, 0.35}}, // Red team
+    {{-0.3, 0.0}, {-0.45, -0.35}, {-0.6, -0.5}, {-0.75, 0.0}, {-0.6, 0.5}, {-0.45, 0.35}} // Blue team
+};
+// Global variables for ball positions
+int ballTeam[2] = {0, 1}; // 0 for Red team, 1 for Blue team
+float ballPositions[2][2] = {{0.0, 0.0}, {0.0, 0.0}}; // x, y positions for both balls
+float interpolationSpeed = 0.02; // Speed of the ball's movement towards the target
 
+
+// Global variables for ball animation
+int currentTarget[2] = {0, 0}; // Start with the first player after the leader
+bool moveToLeader[2] = {false, false}; // Start moving towards players first
+
+// Existing drawPlayer, drawHalfCircle, and other functions...
+void drawPlayer(float x, float y, float r, float g, float b) {
+    glColor3f(r, g, b); // Set player color
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex2f(x, y); // Center of the player
+    for (int i = 0; i <= 360; i++) {
+        float angle = i * M_PI / 180;
+        float dx = x + 0.025 * cos(angle); // Adjust the radius as needed
+        float dy = y + 0.05 * sin(angle);
+        glVertex2f(dx, dy);
+    }
+    glEnd();
 }
 
-void catchSIGUSR2(int sigNum) {
-    // change the end text
-    sprintf(endText, "Simulation time threshold reached");
+void drawBall(float x, float y, float r, float g, float b) {
+    glColor3f(r, g, b); // Set ball color to gold
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex2f(x, y); // Center of the ball
+    for (int i = 0; i <= 360; i++) {
+        float angle = i * M_PI / 180;
+        float dx = x + 0.019* cos(angle); // Radius adjusted for ball size
+        float dy = y + 0.04 * sin(angle);
+        glVertex2f(dx, dy);
+    }
+    glEnd();
+}
 
+void drawText(const char *text, float x, float y, float r, float g, float b) {
+    glColor3f(r, g, b); // Set text color
+    glRasterPos2f(x, y); // Position the text on the screen
+    for (const char* c = text; *c != '\0'; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, *c); // Display each character
+    }
+}
+
+
+void updateBallPosition(int ball);
+
+void switchBallTeam(int ball) {
+    ballTeam[ball] = 1 - ballTeam[ball]; // Switch the ball to the other team
+    currentTarget[ball] = 0; // Reset target player for the new team
+    // Reset ball position (optional based on your game's logic)
+    ballPositions[ball][0] = 0.0;
+    ballPositions[ball][1] = 0.0;
+    // Immediately update the ball position for the new team
+    updateBallPosition(ball);
+}
+
+void updateBallPosition(int ball) {
+    int team = ballTeam[ball];
+    float targetX = playerPositions[team][currentTarget[ball]][0] + (team == 0 ? 0.06 : -0.06); // Adjust based on team
+    float targetY = playerPositions[team][currentTarget[ball]][1];
+    float directionX = targetX - ballPositions[ball][0];
+    float directionY = targetY - ballPositions[ball][1];
+    float length = sqrt(directionX * directionX + directionY * directionY);
+    float speed = 0.01 + (float)rand() / (RAND_MAX / 0.03); // Random speed between 0.01 and 0.04
+
+    if (length > 0) {
+        directionX /= length; // Normalize direction vector
+        directionY /= length; // Normalize direction vector
+    }
+
+    ballPositions[ball][0] += directionX * speed; // Use random speed for movement
+    ballPositions[ball][1] += directionY * speed; // Use random speed for movement
+
+    if (length < speed) { // If the ball has reached (or is about to reach) the target
+        currentTarget[ball]++;
+        if (currentTarget[ball] >= 6) { // Check if the ball needs to switch teams
+            switchBallTeam(ball);
+            return; // Exit to avoid further processing
+        }
+    }
+
+    glutPostRedisplay(); // Request a redraw
+    glutTimerFunc(16, updateBallPosition, ball); // Schedule the next update
+}
+
+void display() {
+    // Clear the screen and draw the field...
+    // Draw players...
+    glClear(GL_COLOR_BUFFER_BIT);
+      // Set line width
+    glLineWidth(5.0);
+
+    // Draw the grass (green rectangle)
+    glColor3f(0.0, 0.45, 0.0);
+    glBegin(GL_QUADS);
+    glVertex2f(-1.0, -1.0);
+    glVertex2f(1.0, -1.0);
+    glVertex2f(1.0, 1.0);
+    glVertex2f(-1.0, 1.0);
+    glEnd();
+
+    // Set color to white for the lines
+    glColor3f(1.0, 1.0, 1.0);
+
+    // Draw the center circle, goal areas, and other field markings...
+    // Abbreviated for brevity
+     // Draw the center circle
+    glBegin(GL_LINE_LOOP);
+    for (int i = 0; i < 360; i++) {
+        float angle = i * M_PI / 180;
+        float x = 0.0 + 0.15 * cos(angle);
+        float y = 0.0 + 0.25 * sin(angle);
+        glVertex2f(x, y);
+    }
+    glEnd();
+
+    // Draw the goal areas, midline, etc.
+    // This part of your code was abbreviated for brevity
+    //Draw the right goal area big rectangle
+   glBegin(GL_LINE_LOOP);
+        glVertex2f(0.95, 0.55);  // Top-right corner
+        glVertex2f(0.65, 0.55);  // Top-right corner, extended to the right
+        glVertex2f(0.65, -0.55);  // Bottom-right corner, extended to the right
+        glVertex2f(0.95, -0.55);  // Bottom-right corner
+    glEnd();
+
+    // Draw the right goal area small rectangle
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(0.95, 0.25);
+        glVertex2f(0.85, 0.25);
+        glVertex2f(0.85, -0.25);
+        glVertex2f(0.95, -0.25);
+    glEnd();
+
+    //-------------------------------------
+    //Left big rectangle
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-0.95, 0.55);   // Top-left corner
+        glVertex2f(-0.65, 0.55);   // Top-left corner, extended to the left
+        glVertex2f(-0.65, -0.55);  // Bottom-left corner, extended to the left
+        glVertex2f(-0.95, -0.55);  // Bottom-left corner
+    glEnd();
+
+    // Draw the left goal area small rectangle
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-0.95, 0.25);
+        glVertex2f(-0.85, 0.25);
+        glVertex2f(-0.85, -0.25);
+        glVertex2f(-0.95, -0.25);
+    glEnd();
+
+    //BIG ALL RECTANGLE
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(-0.95, 0.95);   // Top-left corner
+        glVertex2f(0.95, 0.95);   // Top-left corner, extended to the left
+        glVertex2f(0.95, -0.95);  // Bottom-left corner, extended to the left
+        glVertex2f(-0.95, -0.95);  // Bottom-left corner
+    glEnd();
+
+
+    // Draw the line in the middle
+    glBegin(GL_LINES);
+    glVertex2f(0.0, 0.95);
+    glVertex2f(0.0, -0.95);
+    glEnd();
+
+    //Draw left half circle
+    //drawHalfCircle(-0.65, 0.0, 180, M_PI / 2, -M_PI / 2);
+
+    //Draw right half circle
+    //drawHalfCircle(0.65, 0.0, 180, -M_PI / 2, M_PI / 2);
+
+    for (int team = 0; team < 2; team++) {
+        for (int player = 0; player < 6; player++) {
+            float playerX = playerPositions[team][player][0];
+            float playerY = playerPositions[team][player][1];
+            if(player == 0){
+                drawPlayer(playerX, playerY, 1.0, 1.0, 0.0);// Draw players with team colors
+            }else{
+                drawPlayer(playerX, playerY, team == 0 ? 1.0 : 0.0, 0.0, team == 1 ? 1.0 : 0.0); // Draw players with team colors
+            }
+        }
+    }
+
+    // Draw the ball for each team at the appropriate position
+    // Inside the display function, replace the drawBall calls with:
+    drawBall(ballPositions[0][0], ballPositions[0][1], 0.0, 0.0, 0.0); // For red team
+    drawBall(ballPositions[1][0], ballPositions[1][1], 0.5, 0.5, 0.5); // For blue team
+
+    drawPalestinianFlag(0.15, 0.75, 0.15, 0.15);
+    drawSouthAfricanFlag(-0.3, 0.75, 0.15, 0.15);
+
+    drawText("0", -0.1, 0.8, 0.0, 0.0, 1.0);
+    drawText("0", 0.07, 0.8, 1.0, 0.0, 0.0);
+
+    drawText("Team A", -0.9, -0.9, 0.0, 0.0, 1.0); // Display near the bottom-left corner for the other team
+    drawText("Team B", 0.7, -0.9, 1.0, 0.0, 0.0); // Display near the bottom-right corner for the other team
+
+    glFlush();
+}
+
+int main(int argc, char** argv) {
+    glutInit(&argc, argv); // Initialize GLUT
+    glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB); // Set display mode
+    glutInitWindowSize(1100, 600); // Set window size
+    glutCreateWindow("Football Field"); // Create window with title
+
+    glClearColor(1.0, 1.0, 1.0, 1.0); // Set clear color to white
+
+    srand(time(NULL)); // Seed the random number generator
+
+    // Register callback functions
+    glutDisplayFunc(display); // Register display callback function
+    glutTimerFunc(1000, updateBallPosition, 0); // For ball 0
+    glutTimerFunc(1000, updateBallPosition, 1); // For ball 1
+    glutMainLoop(); // Enter the GLUT event processing loop
+    return 0;
 }
